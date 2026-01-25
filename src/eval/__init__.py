@@ -50,6 +50,9 @@ CLI usage:
 
 from .types import (
     Label,
+    ConflictType,      
+    Evidence,          
+    ConflictInfo,      
     Instance,
     MetricResult,
     EvalResult,
@@ -118,6 +121,9 @@ from .settings import (
 __all__ = [
     # Types
     "Label",
+    "ConflictType",
+    "Evidence",
+    "ConflictInfo",
     "Instance",
     "MetricResult",
     "EvalResult",
