@@ -9,15 +9,25 @@ Three settings:
 3. RAGSetting: Use retrieved evidence (plug in your retriever)
 
 Usage:
-    setting = WithEvidenceSetting()
+    # Simple function retriever
+    setting = RAGSetting(lambda q: ["evidence 1", "evidence 2"], top_k=5)
+    
+    # BaseRetriever with metadata
+    from src.retrieve import ThreeStageAdapter
+    retriever = ThreeStageAdapter(index_dir="...")
+    setting = RAGSetting(retriever, top_k=10)
+    
     prepared = setting.prepare(instance)
-    # Now use prepared instance with any inference method
 """
 
 from abc import ABC, abstractmethod
-from typing import Callable
+from typing import Callable, Any, TYPE_CHECKING
 
 from .types import Instance
+
+if TYPE_CHECKING:
+    from ..retrieve.interface import BaseRetriever
+    from ..rag.base import RAGMethod
 
 
 class BaseSetting(ABC):
@@ -62,6 +72,7 @@ class NoEvidenceSetting(BaseSetting):
             claim=instance.claim,
             evidence=[],
             label=instance.label,
+            conflict_info=instance.conflict_info,
             ground_truth=instance.ground_truth.copy(),
             metadata={
                 **instance.metadata,
@@ -107,6 +118,7 @@ class WithEvidenceSetting(BaseSetting):
             claim=instance.claim,
             evidence=evidence,
             label=instance.label,
+            conflict_info=instance.conflict_info,
             ground_truth=instance.ground_truth.copy(),
             metadata={
                 **instance.metadata,
@@ -116,29 +128,83 @@ class WithEvidenceSetting(BaseSetting):
 
 
 class RAGSetting(BaseSetting):
-    """Use retrieved evidence.
+    """Use retrieved evidence from a retriever or RAG method.
+    
+    Supports multiple interfaces:
+    1. RAGMethod: Full RAG workflow (e.g., BaselineRAG, HyDERAG)
+    2. BaseRetriever: Direct retrieval with metadata preservation
+    3. Callable[[str], list[str]]: Simple function for backward compatibility
     
     Args:
-        retriever: Function (query: str) -> list[str] that returns evidence.
-        top_k: Number of passages to retrieve.
+        retriever: RAGMethod, BaseRetriever, or callable.
+        top_k: Number of passages (only used for BaseRetriever/callable).
+    
+    Example:
+        # With RAGMethod (recommended)
+        from src.retrieve import ThreeStageAdapter, BaselineRAG
+        retriever = ThreeStageAdapter(index_dir="...")
+        method = BaselineRAG(retriever, top_k=10)
+        setting = RAGSetting(method)
+        
+        # With BaseRetriever
+        retriever = ThreeStageAdapter(index_dir="...")
+        setting = RAGSetting(retriever, top_k=10)
+        
+        # With simple function (backward compatible)
+        def my_search(query: str) -> list[str]:
+            return ["result 1", "result 2"]
+        setting = RAGSetting(my_search, top_k=5)
     """
     
-    def __init__(self, retriever: Callable[[str], list[str]], top_k: int = 5):
-        self.retriever = retriever
+    def __init__(
+        self, 
+        retriever: "RAGMethod | BaseRetriever | Callable[[str], list[str]]", 
+        top_k: int = 5
+    ):
+        self._retriever = retriever
         self.top_k = top_k
+        
+        # Detect interface type
+        self._is_rag_method = hasattr(retriever, 'retrieve') and hasattr(retriever, 'name') and hasattr(retriever, 'as_retriever')
+        self._has_retrieve_method = hasattr(retriever, 'retrieve') and callable(getattr(retriever, 'retrieve'))
     
     @property
     def name(self) -> str:
+        if self._is_rag_method:
+            return f"rag_{self._retriever.name}"
         return f"rag_top{self.top_k}"
     
     def prepare(self, instance: Instance) -> Instance:
-        retrieved = self.retriever(instance.claim)[:self.top_k]
+        """Prepare instance with retrieved evidence.
+        
+        Args:
+            instance: Original instance.
+        
+        Returns:
+            New instance with retrieved evidence.
+        """
+        if self._is_rag_method:
+            # Use RAGMethod interface
+            evidence_objects = self._retriever.retrieve(instance.claim)
+            evidence = [e.to_dict() for e in evidence_objects]
+            retriever_info = self._retriever.name
+        elif self._has_retrieve_method:
+            # Use BaseRetriever interface
+            evidence_objects = self._retriever.retrieve(instance.claim, self.top_k)
+            evidence = [e.to_dict() for e in evidence_objects]
+            retriever_info = repr(self._retriever)
+        else:
+            # Use simple callable
+            texts = self._retriever(instance.claim)[:self.top_k]
+            evidence = [{"text": t, "metadata": {}} for t in texts]
+            retriever_info = "callable"
         
         return Instance(
             id=instance.id,
             claim=instance.claim,
-            evidence=retrieved,
+            evidence=evidence,
             label=instance.label,
+            conflict_info=instance.conflict_info,
             ground_truth={
                 **instance.ground_truth,
                 "original_evidence": instance.evidence,
@@ -146,5 +212,71 @@ class RAGSetting(BaseSetting):
             metadata={
                 **instance.metadata,
                 "setting": self.name,
+                "retriever": retriever_info,
             },
         )
+    
+    def prepare_batch(self, instances: list[Instance]) -> list[Instance]:
+        """Prepare multiple instances with retrieved evidence.
+        
+        Uses batch retrieval if available for efficiency.
+        """
+        if self._is_rag_method and hasattr(self._retriever, 'retrieve_batch'):
+            # Use RAGMethod batch retrieval
+            queries = [inst.claim for inst in instances]
+            all_evidence = self._retriever.retrieve_batch(queries)
+            retriever_info = self._retriever.name
+            
+            prepared = []
+            for inst, evidence_list in zip(instances, all_evidence):
+                evidence = [e.to_dict() for e in evidence_list]
+                prepared.append(Instance(
+                    id=inst.id,
+                    claim=inst.claim,
+                    evidence=evidence,
+                    label=inst.label,
+                    conflict_info=inst.conflict_info,
+                    ground_truth={
+                        **inst.ground_truth,
+                        "original_evidence": inst.evidence,
+                    },
+                    metadata={
+                        **inst.metadata,
+                        "setting": self.name,
+                        "retriever": retriever_info,
+                    },
+                ))
+            return prepared
+        elif self._has_retrieve_method and hasattr(self._retriever, 'retrieve_batch'):
+            # Use BaseRetriever batch retrieval
+            queries = [inst.claim for inst in instances]
+            all_evidence = self._retriever.retrieve_batch(queries, self.top_k)
+            
+            prepared = []
+            for inst, evidence_list in zip(instances, all_evidence):
+                evidence = [e.to_dict() for e in evidence_list]
+                prepared.append(Instance(
+                    id=inst.id,
+                    claim=inst.claim,
+                    evidence=evidence,
+                    label=inst.label,
+                    conflict_info=inst.conflict_info,
+                    ground_truth={
+                        **inst.ground_truth,
+                        "original_evidence": inst.evidence,
+                    },
+                    metadata={
+                        **inst.metadata,
+                        "setting": self.name,
+                        "retriever": repr(self._retriever),
+                    },
+                ))
+            return prepared
+        else:
+            # Fall back to sequential
+            return [self.prepare(inst) for inst in instances]
+    
+    def __repr__(self) -> str:
+        if self._is_rag_method:
+            return f"RAGSetting(method={self._retriever})"
+        return f"RAGSetting(top_k={self.top_k}, retriever={repr(self._retriever)})"
