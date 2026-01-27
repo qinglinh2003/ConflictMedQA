@@ -50,9 +50,9 @@ CLI usage:
 
 from .types import (
     Label,
-    ConflictType,      
-    Evidence,          
-    ConflictInfo,      
+    ConflictType,
+    Evidence,
+    ConflictInfo,
     Instance,
     MetricResult,
     EvalResult,
@@ -118,12 +118,11 @@ from .settings import (
     RAGSetting,
 )
 
+from .loaders import load_instances
+
 __all__ = [
     # Types
     "Label",
-    "ConflictType",
-    "Evidence",
-    "ConflictInfo",
     "Instance",
     "MetricResult",
     "EvalResult",
@@ -177,4 +176,6 @@ __all__ = [
     "NoEvidenceSetting",
     "WithEvidenceSetting",
     "RAGSetting",
+    # Loaders
+    "load_instances",
 ]
