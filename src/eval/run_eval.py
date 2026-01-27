@@ -2,12 +2,10 @@
 """Command-line interface for ConflictMedQA evaluation."""
 
 import argparse
-import json
 import logging
-import sys
-from pathlib import Path
 
 from .types import Instance, Label
+from .loaders import load_instances
 from .evaluator import Evaluator, EvaluatorConfig
 from .question_types import (
     DirectQuestion,
@@ -31,27 +29,6 @@ QUESTION_TYPES = {
     "confidence": ConfidenceQuestion,
     "consensus": ConsensusQuestion,
 }
-
-
-def load_instances(path: str) -> list[Instance]:
-    """Load instances from a JSON or JSONL file."""
-    path = Path(path)
-    instances = []
-    
-    with open(path, "r") as f:
-        if path.suffix == ".jsonl":
-            for line in f:
-                data = json.loads(line.strip())
-                instances.append(Instance.from_dict(data))
-        else:
-            data = json.load(f)
-            if isinstance(data, list):
-                for item in data:
-                    instances.append(Instance.from_dict(item))
-            else:
-                instances.append(Instance.from_dict(data))
-    
-    return instances
 
 
 def create_llm(args):
